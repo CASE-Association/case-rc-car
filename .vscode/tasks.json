@@ -1,0 +1,43 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Dual Monitor",
+            "dependsOn": [
+                "Monitor Reciever",
+                "Monitor Transmitter"
+            ]
+        },
+        {
+            "label": "Upload Reciever",
+            "type": "shell",
+            "command": "platformio run --target upload --upload-port /dev/cu.usbserial-1410",
+        },
+        {
+            "label": "Monitor Reciever",
+            "type": "shell",
+            "isBackground": true,
+            "presentation": {
+                "group": "debugging"
+            },
+            "command": "platformio device monitor -p /dev/cu.usbserial-1410",
+        },
+        {
+            "label": "Upload Transmitter",
+            "type": "shell",
+            "command": "platformio run --target upload --upload-port /dev/cu.usbserial-1420",
+        },
+        {
+            "label": "Monitor Transmitter",
+            "type": "shell",
+            "isBackground": true,
+            "presentation": {
+                "group": "debugging"
+            },
+            "command": "platformio device monitor -p /dev/cu.usbserial-1420",
+        }
+        
+    ]
+}
+
+

@@ -1,3 +1,16 @@
+/**
+ * @file main.cpp
+ * @author Isak Åslund (aslundisak@gmail.com)
+ * @brief Wirelessly controlled  RC car by tilting your hand. Uses an Arduino (MCU), MPU6050 (IMU) and NRF24 (wireless transceiver)
+ * @comment This code is heavily inspired and dependant on the I2Cdev and MPU6050 library from jrowberg. Check it out on github.
+ * @links https://github.com/jrowberg/i2cdevlib and https://github.com/jrowberg/i2cdevlib/tree/master/Arduino/MPU6050 
+ * @version 0.1
+ * @date 2019-08-28
+ */
+
+// ================================================================
+// ===                     Includes                             ===
+// ================================================================
 #include <Arduino.h>
 #include <SPI.h>
 #include <Servo.h>
@@ -5,43 +18,42 @@
 #include "RF24.h"
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps20.h"  
-#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-    #include "Wire.h"
-#endif
+#include "Wire.h"
 
-// Uncommet for trasmitter, comment for reciever.
-//#define TRANSMITTER
-//#define DEBUG
+// ================================================================
+// ===                      Defines                             ===
+// ================================================================
+//#define TRANSMITTER     // Uncommet for trasmitter, comment for receiver.
+#define DEBUG             // Deactivating serial print greatly increases the responsiveness of the system.
 
+#define INTERRUPT_PIN   2 // Used for MPU6050 data ready interrupt
+#define TURN_PIN        3 // PWM pin for servo controlling turning
+#define THROTTLE_PIN    5 // PWM pin for ESC controlling speed
+
+// ================================================================
+// ===                     Global variables                     ===
+// ================================================================
+
+// Since the ESC and servo expects servo PWM signals which is 20ms apart and between 1-2ms long
+// it can be hard to use normal PWM signal that's why we use the servo library. 
 Servo servo;
 Servo ESC;
 
-RF24 radio(7, 8); // CE, CSN
-const byte address[6] = "00001";
-
-// int is used instead of float because of easier data handling.
+// NRF24
+RF24 radio(7, 8);                   // 7 - CE, 8 -CSN
+const byte address[6] = "00001";    // Adress for communicating
+unsigned long lastData = 0;         // Used for knowing if data has been received recently
 typedef struct{
-    int yaw;
-    int pitch;
-    int roll;
-}message_t;
-
+    int throttle;
+    int turn;
+}message_t;                         // Struct for making sending/receiving easy
 message_t msg; 
 
+// MPU6050
+int16_t ax, ay, az;     // Acceleration X, Y, Z
+int16_t gx, gy, gz;     // Gyro values X, Y, Z
+int lastValue;          // Used for creating a low pass filter for turning angle
 MPU6050 mpu;
-
-//#define OUTPUT_READABLE_QUATERNION
-//#define OUTPUT_READABLE_EULER
-#define OUTPUT_READABLE_YAWPITCHROLL
-//#define OUTPUT_READABLE_REALACCEL
-//#define OUTPUT_READABLE_WORLDACCEL
-//#define OUTPUT_TEAPOT
-
-#define INTERRUPT_PIN   2  // use pin 2 on Arduino Uno & most boards
-#define TURN_PIN        3
-#define THROTTLE_PIN    5
-
-bool blinkState = false;
 
 // MPU control/status vars
 bool dmpReady = false;  // set true if DMP init was successful
@@ -60,9 +72,6 @@ VectorFloat gravity;    // [x, y, z]            gravity vector
 float euler[3];         // [psi, theta, phi]    Euler angle container
 float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
 
-// packet structure for InvenSense teapot demo
-uint8_t teapotPacket[14] = { '$', 0x02, 0,0, 0,0, 0,0, 0,0, 0x00, 0x00, '\r', '\n' };
-
 // ================================================================
 // ===               INTERRUPT DETECTION ROUTINE                ===
 // ================================================================
@@ -77,51 +86,40 @@ void dmpDataReady() {
 // ================================================================
 
 void setup() {
-    // join I2C bus (I2Cdev library doesn't do this automatically)
-    #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-        Wire.begin();
-        Wire.setClock(400000); // 400kHz I2C clock. Comment this line if having compilation difficulties
-    #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
-        Fastwire::setup(400, true);
-    #endif
+    Wire.begin();
+    Wire.setClock(400000); // 400kHz I2C clock
 
     Serial.begin(9600);
-    while (!Serial);
 
-    Serial.println("----- Welcome to case rf car controller by jazzy hands! -----");
+    Serial.println("=============================================================")
+    Serial.println("----- Welcome to CASE rf car controller by jazzy hands! -----");
     Serial.print("----- This device is a: ");
     
 
     #ifdef TRANSMITTER
         Serial.println("TRANSMITTER -----");
+
+        // Setup NRF24 as transmitter
         radio.begin();
         radio.openWritingPipe(address);
         radio.setPALevel(RF24_PA_MAX); 
         radio.setDataRate(RF24_2MBPS);
         radio.stopListening();
 
-        // initialize device
-        Serial.println(F("Initializing I2C devices..."));
+        // Initialize MPU
+        Serial.println(F("Initializing MPU..."));
         mpu.initialize();
         pinMode(INTERRUPT_PIN, INPUT);
 
-        // verify connection
-        Serial.println(F("Testing device connections..."));
+        // Verify connection
+        Serial.println(F("Testing MPU connections..."));
         Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
 
-        // wait for ready
-        /*
-        Serial.println(F("\nSend any character to begin DMP programming and demo: "));
-        while (Serial.available() && Serial.read()); // empty buffer
-        while (!Serial.available());                 // wait for data
-        while (Serial.available() && Serial.read()); // empty buffer again
-        */
-
-        // load and configure the DMP
-        Serial.println(F("Initializing DMP..."));
+        // Load and configure the DMP
+        Serial.println(F("Initializing DMP on MPU..."));
         devStatus = mpu.dmpInitialize();
 
-        // supply your own gyro offsets here, scaled for min sensitivity
+        // Calibration data
         // see calibration.txt for more info. 
         mpu.setXGyroOffset(148);
         mpu.setYGyroOffset(68);
@@ -134,7 +132,6 @@ void setup() {
             mpu.CalibrateAccel(6);
             mpu.CalibrateGyro(6);
             mpu.PrintActiveOffsets();
-            // turn on the DMP, now that it's ready
             Serial.println(F("Enabling DMP..."));
             mpu.setDMPEnabled(true);
 
@@ -146,7 +143,7 @@ void setup() {
             mpuIntStatus = mpu.getIntStatus();
 
             // set our DMP Ready flag so the main loop() function knows it's okay to use it
-            Serial.println(F("DMP ready! Waiting for first interrupt..."));
+            Serial.println(F("DMP ready and running!"));
             dmpReady = true;
 
             // get expected DMP packet size for later comparison
@@ -163,9 +160,11 @@ void setup() {
     #else
         Serial.println("RECIEVER -----");
 
+        // 1-2ms where 1.5ms is 90deg on servo and no throttle on ESC
         servo.attach(TURN_PIN, 1000, 2000);
-        //ESC.attach(THROTTLE_PIN, 1000, 2000);
+        ESC.attach(THROTTLE_PIN, 1000, 2000);
 
+        // Setup as receiver
         radio.begin();
         radio.openReadingPipe(0, address);
         radio.setPALevel(RF24_PA_MAX);
@@ -192,15 +191,6 @@ void loop() {
             fifoCount = mpu.getFIFOCount();
             }  
             // other program behavior stuff here
-            // .
-            // .
-            // .
-            // if you are really paranoid you can frequently test in between other
-            // stuff to see if mpuInterrupt is true, and if so, "break;" from the
-            // while() loop to immediately process the MPU data
-            // .
-            // .
-            // .
         }
 
         // reset interrupt flag and get INT_STATUS byte
@@ -217,7 +207,7 @@ void loop() {
         else if ((mpuIntStatus & _BV(MPU6050_INTERRUPT_FIFO_OFLOW_BIT)) || fifoCount >= 1024) {
             // reset so we can continue cleanly
             mpu.resetFIFO();
-        //  fifoCount = mpu.getFIFOCount();  // will be zero after reset no need to ask
+            //  fifoCount = mpu.getFIFOCount();  // will be zero after reset no need to ask
             Serial.println(F("FIFO overflow!"));
 
         // otherwise, check for DMP data ready interrupt (this should happen frequently)
@@ -225,123 +215,70 @@ void loop() {
 
             // read a packet from FIFO
             while(fifoCount >= packetSize){ 
-                // Lets catch up to NOW, someone is using the dreaded delay()!
+    
                 mpu.getFIFOBytes(fifoBuffer, packetSize);
                 // track FIFO count here in case there is > 1 packet available
                 // (this lets us immediately read more without waiting for an interrupt)
                 fifoCount -= packetSize;
             }
-            #ifdef OUTPUT_READABLE_QUATERNION
-                // display quaternion values in easy matrix form: w x y z
-                mpu.dmpGetQuaternion(&q, fifoBuffer);
-                Serial.print("quat\t");
-                Serial.print(q.w);
-                Serial.print("\t");
-                Serial.print(q.x);
-                Serial.print("\t");
-                Serial.print(q.y);
-                Serial.print("\t");
-                Serial.println(q.z);
-            #endif
 
-            #ifdef OUTPUT_READABLE_EULER
-                // display Euler angles in degrees
-                mpu.dmpGetQuaternion(&q, fifoBuffer);
-                mpu.dmpGetEuler(euler, &q);
-                Serial.print("euler\t");
-                Serial.print(euler[0] * 180/M_PI);
-                Serial.print("\t");
-                Serial.print(euler[1] * 180/M_PI);
-                Serial.print("\t");
-                Serial.println(euler[2] * 180/M_PI);
-            #endif
+        // Get raw motion data
+        mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+        // We use gravity vector on X and Y axis to determine how to accelerate/decelerate and turn.
+        // This makes it possible to walk around in a room and rotate your entire body without affecting which way turns where.
+        // You will know what I mean if you try and use absolute orientation angles.
 
-            #ifdef OUTPUT_READABLE_YAWPITCHROLL
-                // display Euler angles in degrees
-                mpu.dmpGetQuaternion(&q, fifoBuffer);
-                mpu.dmpGetGravity(&gravity, &q);
-                mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-
-                // round to nearest whole number and cast to int. 
-                msg.yaw = int( roundf(ypr[0] * 180/M_PI) );
-                msg.pitch = int( roundf(ypr[1] * 180/M_PI) );
-                msg.roll = int( roundf(ypr[2] * 180/M_PI) );
-
-                #ifdef DEBUG
-                Serial.print("SENDING - yaw pitch roll:\t");
-                Serial.print(msg.yaw);
-                Serial.print("\t");
-                Serial.print(msg.pitch);
-                Serial.print("\t");
-                Serial.println(msg.roll);
-                #endif
-
-                radio.write(&msg, sizeof(msg));
-            #endif
-
-            #ifdef OUTPUT_READABLE_REALACCEL
-                // display real acceleration, adjusted to remove gravity
-                mpu.dmpGetQuaternion(&q, fifoBuffer);
-                mpu.dmpGetAccel(&aa, fifoBuffer);
-                mpu.dmpGetGravity(&gravity, &q);
-                mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-                Serial.print("areal\t");
-                Serial.print(aaReal.x);
-                Serial.print("\t");
-                Serial.print(aaReal.y);
-                Serial.print("\t");
-                Serial.println(aaReal.z);
-            #endif
-
-            #ifdef OUTPUT_READABLE_WORLDACCEL
-                // display initial world-frame acceleration, adjusted to remove gravity
-                // and rotated based on known orientation from quaternion
-                mpu.dmpGetQuaternion(&q, fifoBuffer);
-                mpu.dmpGetAccel(&aa, fifoBuffer);
-                mpu.dmpGetGravity(&gravity, &q);
-                mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-                mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);
-                Serial.print("aworld\t");
-                Serial.print(aaWorld.x);
-                Serial.print("\t");
-                Serial.print(aaWorld.y);
-                Serial.print("\t");
-                Serial.println(aaWorld.z);
-            #endif
-        
-            #ifdef OUTPUT_TEAPOT
-                // display quaternion values in InvenSense Teapot demo format:
-                teapotPacket[2] = fifoBuffer[0];
-                teapotPacket[3] = fifoBuffer[1];
-                teapotPacket[4] = fifoBuffer[4];
-                teapotPacket[5] = fifoBuffer[5];
-                teapotPacket[6] = fifoBuffer[8];
-                teapotPacket[7] = fifoBuffer[9];
-                teapotPacket[8] = fifoBuffer[12];
-                teapotPacket[9] = fifoBuffer[13];
-                Serial.write(teapotPacket, 14);
-                teapotPacket[11]++; // packetCount, loops at 0xFF on purpose
-            #endif
+        // The RC car is extremly fast (40+ km/h )
+        // We have to map the accelerometer value from min/max to servo signal (0-180) and scale it to reduce max speed 
+        // A accelerometer value of 0 means no acceleration and should map to 90 which means no throttle. 0 is full reverse and 180 full forward.
+        msg.throttle = map(ax, -17000, 17000, 80, 110);
+        // The ESC has slower backward speed than forward so we inscrease the speed backwards to make it easier to use.
+        if(msg.throttle < 88){
+            msg.throttle = msg.throttle / 2;
         }
-    #else  // Reciever
+
+        // We want the full motion for turning so we only map the acceleration value to a value form 0-180 where 0 maps to 90 (no turn)
+        msg.turn = map(ay, -17000, 17000, 0, 180);
+        // We apply a crude low pass filter on the turn signal to reduce vibrations in the servo.
+        msg.turn = 0.8 * msg.turn + 0.2 * lastValue;
+        lastValue = msg.turn;
+
+        #ifdef DEBUG
+            Serial.print("Data - ax, ay\t");
+            Serial.print( msg.throttle );
+            Serial.print("\t");
+            Serial.println( msg.turn );
+        #endif
+
+        // Send the data
+        radio.write(&msg, sizeof(msg));        
+        }
+    #else  // Receiver
         if (radio.available()) {
-            message_t data; // Incomming data will be stored in this variable.
+            // Read and store the data in the struct. 
+            message_t data; 
             radio.read(&data, sizeof(data));
 
             #ifdef DEBUG
-            Serial.print("RECIEVED - yaw pitch roll:\t");
-            Serial.print(data.yaw);
+            Serial.print("RECIEVED - throttle, turn:\t");
+            Serial.print(data.throttle);
             Serial.print("\t");
-            Serial.print(data.pitch);
-            Serial.print("\t");
-            Serial.println(data.roll);
+            Serial.println(data.turn);
             #endif
 
-            // 1. Constrain the sensoroutput to +-90 deg.
-            // 2. Map the +-90 to 0-180 to use the servo library. 
-            servo.write( map( constrain(data.pitch,-90, 90), -90, 90, 0, 180) );
-            //ESC.write( map( constrain(data.roll,-90, 90), -90, 90, 0, 180) );
-        }
+            // The Receiver does no processing of data
+            // This makes it possible to only update the transmitter when updating code, neat! :) 
+            servo.write( data.turn );
+            ESC.write( data.throttle );
 
+            // Udate that we got data
+            lastData = millis();
+        }else{
+            //If there hasn't been data for 200ms (something went wrong or transmitter power off), send default values to the car and stop it.
+            if(millis() - lastData > 200){
+                servo.write(90);
+                ESC.write(90);
+            }
+        }
     #endif
 }
